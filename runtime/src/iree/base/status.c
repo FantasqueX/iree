@@ -23,46 +23,6 @@
 #include "iree/base/status_payload.h"
 
 //===----------------------------------------------------------------------===//
-// C11 aligned_alloc compatibility shim
-//===----------------------------------------------------------------------===//
-
-#if defined(IREE_PLATFORM_WINDOWS)
-// https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/aligned-malloc
-#define iree_aligned_alloc(alignment, size) _aligned_malloc(size, alignment)
-#define iree_aligned_free(p) _aligned_free(p)
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-// https://en.cppreference.com/w/c/memory/aligned_alloc
-#define iree_aligned_alloc(alignment, size) aligned_alloc(alignment, size)
-#define iree_aligned_free(p) free(p)
-#elif _POSIX_C_SOURCE >= 200112L
-// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_memalign.html
-static inline void* iree_aligned_alloc(size_t alignment, size_t size) {
-  void* ptr = NULL;
-  return posix_memalign(&ptr, alignment, size) == 0 ? ptr : NULL;
-}
-#define iree_aligned_free(p) free(p)
-#else
-// Emulates alignment with normal malloc. We overallocate by at least the
-// alignment + the size of a pointer, store the base pointer at p[-1], and
-// return the aligned pointer. This lets us easily get the base pointer in free
-// to pass back to the system.
-static inline void* iree_aligned_alloc(size_t alignment, size_t size) {
-  void* base_ptr = malloc(size + alignment + sizeof(uintptr_t));
-  if (!base_ptr) return NULL;
-  uintptr_t* aligned_ptr = (uintptr_t*)iree_host_align(
-      (uintptr_t)base_ptr + sizeof(uintptr_t), alignment);
-  aligned_ptr[-1] = (uintptr_t)base_ptr;
-  return aligned_ptr;
-}
-static inline void iree_aligned_free(void* p) {
-  if (IREE_UNLIKELY(!p)) return;
-  uintptr_t* aligned_ptr = (uintptr_t*)p;
-  void* base_ptr = (void*)aligned_ptr[-1];
-  free(base_ptr);
-}
-#endif  // IREE_PLATFORM_WINDOWS
-
-//===----------------------------------------------------------------------===//
 // iree_status_t canonical errors
 //===----------------------------------------------------------------------===//
 
@@ -389,7 +349,7 @@ iree_status_allocate(iree_status_code_t code, const char* file, uint32_t line,
   size_t storage_alignment = (IREE_STATUS_CODE_MASK + 1);
   size_t storage_size =
       iree_host_align(sizeof(iree_status_storage_t), storage_alignment);
-  iree_status_storage_t* storage = (iree_status_storage_t*)iree_aligned_alloc(
+  iree_status_storage_t* storage = (iree_status_storage_t*)aligned_alloc(
       storage_alignment, storage_size);
   if (IREE_UNLIKELY(!storage)) return iree_status_from_code(code);
   memset(storage, 0, sizeof(*storage));
@@ -434,7 +394,7 @@ IREE_MUST_USE_RESULT static iree_status_t iree_status_allocate_vf_impl(
   size_t storage_alignment = (IREE_STATUS_CODE_MASK + 1);
   size_t storage_size = iree_host_align(
       sizeof(iree_status_storage_t) + message_size, storage_alignment);
-  iree_status_storage_t* storage = (iree_status_storage_t*)iree_aligned_alloc(
+  iree_status_storage_t* storage = (iree_status_storage_t*)aligned_alloc(
       storage_alignment, storage_size);
   if (IREE_UNLIKELY(!storage)) return iree_status_from_code(code);
   memset(storage, 0, sizeof(*storage));
@@ -450,7 +410,7 @@ IREE_MUST_USE_RESULT static iree_status_t iree_status_allocate_vf_impl(
   int ret =
       vsnprintf((char*)storage->message.data, message_size, format, varargs_1);
   if (IREE_UNLIKELY(ret < 0)) {
-    iree_aligned_free(storage);
+    free(storage);
     return (iree_status_t)code;
   }
 
@@ -520,7 +480,7 @@ IREE_API_EXPORT void iree_status_free(iree_status_t status) {
     iree_allocator_free(payload->allocator, payload);
     payload = next;
   }
-  iree_aligned_free(storage);
+  free(storage);
 #endif  // has any IREE_STATUS_FEATURES
 }
 
@@ -634,7 +594,7 @@ IREE_MUST_USE_RESULT static iree_status_t iree_status_annotate_vf(
   int ret = vsnprintf((char*)payload->message.data, payload->message.size + 1,
                       format, varargs_1);
   if (IREE_UNLIKELY(ret < 0)) {
-    iree_aligned_free(payload);
+    free(payload);
     return base_status;
   }
   return iree_status_append_payload(base_status, storage,
@@ -830,7 +790,7 @@ iree_status_freeze(iree_status_t status) {
   size_t storage_size =
       iree_host_align(unaligned_storage_size, storage_alignment);
   iree_status_storage_t* new_storage =
-      (iree_status_storage_t*)iree_aligned_alloc(storage_alignment,
+      (iree_status_storage_t*)aligned_alloc(storage_alignment,
                                                  storage_size);
   if (IREE_UNLIKELY(!new_storage)) {
     iree_status_free(status);
